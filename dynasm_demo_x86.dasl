@@ -220,7 +220,7 @@ end
 
 function demo.multiply(Dst)
 
-	|.if X86                       // int args in stack in reverse order; int ret in eax
+    |.if X86                       // int args in stack in reverse order; int ret in eax
 	|  mov eax, [esp+4]
 	|  imul dword [esp+8]
 	|  ret

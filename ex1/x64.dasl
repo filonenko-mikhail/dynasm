@@ -1,0 +1,31 @@
+local ffi = require('ffi') -- required
+local dasm = require('dasm') --required
+
+--must be the first instruction
+|.arch x64
+--make an action list called `actions`
+|.actionlist actions
+|.globalnames globalnames
+
+local gen = {}
+
+function gen.nop(Dst)
+        |nop
+end
+
+function gen.int3(Dst)
+        |int3
+end
+
+function gen.prolog(Dst)
+        |push rbp
+        |mov rbp,rsp
+end
+
+function gen.epilog(Dst)
+        |mov rsp, rbp
+        |pop rbp
+        |ret
+end
+
+return {gen = gen, actions = actions, globalnames = globalnames}

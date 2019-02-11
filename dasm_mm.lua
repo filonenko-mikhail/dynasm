@@ -1,4 +1,3 @@
-
 --wrappers around mmap to support dynamic code exection.
 --Written by Cosmin Apreutesei. Public Domain.
 --Tested with Windows, Linux, BSD and OSX, x86 and x86-64.
@@ -94,7 +93,9 @@ elseif ffi.os == 'Linux' or ffi.os == 'BSD' or ffi.os == 'OSX' then
 	local MAP_ANON = ffi.os == 'Linux' and 0x20 or 0x1000
 
 	function new(size)
-		local ret = C.mmap(nil, size, bit.bor(PROT_READ, PROT_WRITE), bit.bor(MAP_PRIVATE, MAP_ANON), -1, 0)
+		local ret = C.mmap(nil, size,
+                           bit.bor(PROT_READ, PROT_WRITE),
+                           bit.bor(MAP_PRIVATE, MAP_ANON), -1, 0)
 		if ffi.cast('intptr_t', ret) == ffi.cast('intptr_t', -1) then
 			error(string.format('mmap errno: %d', ffi.errno()))
 		end

@@ -2093,6 +2093,8 @@ map_op[".template__"] = function(params, template, nparams)
     end
   end
 
+  -- m1:D14m | mC1qdwb:D34m | mi:C14mU
+  msg = msg .. ' ' .. template
   werror(msg.." in `"..opmodestr(params.op, args).."'")
 end
 
@@ -2396,4 +2398,3 @@ end
 return _M
 
 ------------------------------------------------------------------------------
-
