@@ -127,6 +127,11 @@ local codes = {
 
     {[[ (<= 1 1) ]], 1ULL},
     {[[ (<= 1 2) ]], 1ULL},
+
+    {[[ (shl 1 2)]], 4ULL},
+    {[[ (shl 1 4)]], 16ULL},
+
+    {[[ (shr 16 4)]], 1ULL},
 }
 
 for idx, code in ipairs(codes) do

@@ -519,6 +519,84 @@ gen['xor'] = function(Dst, context)
         |xor Rq(dst), Rq(src)
 end
 
+gen['shl'] = function(Dst, context)
+    if context.reg_index == 1 or context.reg_index == 2 then
+        error('Too few operands for shl')
+    end
+
+    -- all operands in stack
+    if context.reg_stack[context.reg_index - 2] == nil then
+        local free_reg = context.free_reg
+        context.reg_index = context.reg_index - 1
+            |mov Rq(free_reg), rcx
+            |pop rcx
+            |shl qword [rsp], cl
+            |mov rcx, Rq(free_reg)
+        return
+    end
+
+    -- one operand in stack
+    if context.reg_stack[context.reg_index - 1] == nil then
+        local reg = context.reg_stack[context.reg_index - 2]
+        context.reg_index = context.reg_index - 1
+            |mov Rq(free_reg), rcx
+            |pop rcx
+            |shl Rq(reg), cl
+            |mov rcx, Rq(free_reg)
+        return
+    end
+
+    local reg = context.reg_stack[context.reg_index - 2]
+    -- all operands in registers
+    local dst = context.reg_stack[context.reg_index - 2]
+    local src = context.reg_stack[context.reg_index - 1]
+    context.reg_index = context.reg_index - 1
+
+        |mov Rq(free_reg), rcx
+        |mov rcx, Rq(src)
+        |shl Rq(dst), cl
+        |mov rcx, Rq(free_reg)
+end
+
+gen['shr'] = function(Dst, context)
+    if context.reg_index == 1 or context.reg_index == 2 then
+        error('Too few operands for shl')
+    end
+
+    -- all operands in stack
+    if context.reg_stack[context.reg_index - 2] == nil then
+        local free_reg = context.free_reg
+        context.reg_index = context.reg_index - 1
+            |mov Rq(free_reg), rcx
+            |pop rcx
+            |shr qword [rsp], cl
+            |mov rcx, Rq(free_reg)
+        return
+    end
+
+    -- one operand in stack
+    if context.reg_stack[context.reg_index - 1] == nil then
+        local reg = context.reg_stack[context.reg_index - 2]
+        context.reg_index = context.reg_index - 1
+            |mov Rq(free_reg), rcx
+            |pop rcx
+            |shr Rq(reg), cl
+            |mov rcx, Rq(free_reg)
+        return
+    end
+
+    local reg = context.reg_stack[context.reg_index - 2]
+    -- all operands in registers
+    local dst = context.reg_stack[context.reg_index - 2]
+    local src = context.reg_stack[context.reg_index - 1]
+    context.reg_index = context.reg_index - 1
+
+        |mov Rq(free_reg), rcx
+        |mov rcx, Rq(src)
+        |shr Rq(dst), cl
+        |mov rcx, Rq(free_reg)
+end
+
 function gen.push(Dst, imm, context)
     -- registers is over
     if context.reg_stack[context.reg_index] == nil then

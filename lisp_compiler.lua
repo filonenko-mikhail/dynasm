@@ -294,38 +294,34 @@ symbols['bitnot'] = function(state, form, context)
     lisp_x64.gen['not'](state, context)
 end
 
-symbols['bitand'] = function(state, form, context)
-    if #form == 1 or #form == 2 then
-        utils.errorx('Too few arguments for bitand at position %q', form.position)
+for op, gen in pairs({
+        ['bitand']='and',
+        ['bitor']='or',
+        ['bitxor']='xor',
+        ['shl']='shl',
+        ['shr']='shr'}) do
+
+    symbols[op] = function(state, form, context)
+        if #form == 1 or #form == 2 then
+            utils.errorx('Too few arguments for %s at position %q', op, form.position)
+        end
+
+        local old_index = context.reg_index
+        compile_form(state, form[2], context)
+        if old_index + 1 ~= context.reg_index then
+            utils.errorx('No 1st argument result at position %q', form.position)
+        end
+        old_index = context.reg_index
+        compile_form(state, form[3], context)
+        if old_index + 1 ~= context.reg_index then
+            utils.errorx('No 2nd argument result at position %q', form.position)
+        end
+
+        lisp_x64.gen[gen](state, context)
     end
 
-    compile_form(state, form[2], context)
-    compile_form(state, form[3], context)
-
-    lisp_x64.gen['and'](state, context)
 end
 
-symbols['bitor'] = function(state, form, context)
-    if #form == 1 or #form == 2 then
-        utils.errorx('Too few arguments for bitor at position %q', form.position)
-    end
-
-    compile_form(state, form[2], context)
-    compile_form(state, form[3], context)
-
-    lisp_x64.gen['or'](state, context)
-end
-
-symbols['bitxor'] = function(state, form, context)
-    if #form == 1 or #form == 2 then
-        utils.errorx('Too few arguments for bitxor at position %q', form.position)
-    end
-
-    compile_form(state, form[2], context)
-    compile_form(state, form[3], context)
-
-    lisp_x64.gen['xor'](state, context)
-end
 
 symbols['+'] = function(state, form, context)
     if #form == 1 then
