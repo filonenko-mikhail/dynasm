@@ -69,7 +69,15 @@ function gen.new_context()
 
     context.label = 0
 
+    context.docontinue = {}
+    context.dobreak = {}
     context.dostack = {}
+
+    context.alignstack = {}
+
+    context.registers = registers
+
+    context.cells = {}
     return context
 end
 
@@ -101,24 +109,103 @@ function gen.new_context_with_registers(count)
 
     context.label = 0
 
+    context.docontinue = {}
+    context.dobreak = {}
     context.dostack = {}
+    context.alignstack = {}
+
+    context.registers = registers
+
+    context.cells = {}
     return context
 end
 
-function gen.mov64_rqx_imm(Dst, q, imm)
-        |mov64 Rq(q), imm
+function gen.align_stack_to16(Dst, context)
+    local filled = context.reg_index - 1
+    if filled > #context.reg_stack then
+        filled = filled - context.reg_stack
+    end
+
+    if filled % 2 ~= 0 then
+        table.insert(context.alignstack, true)
+        local mask = tonumber64('0xFFFFFFFFFFFFFFF0')
+            |and rsp, mask
+    else
+        table.insert(context.alignstack, false)
+    end
 end
 
-function gen.call_rqx(Dst, q)
-        |call Rq(q)
+function gen.align_stack_back_to16(Dst, context)
+    if context.alignstack[#context.alignstack] then
+            |add rsp, 0x8
+    end
+
+    table.remove(context.alignstack)
 end
 
-function gen.push_rqx(Dst, q)
-        |push Rq(q)
+function gen.pop_result_to(Dst, context, reg)
+    -- operand in stack
+    if context.reg_stack[context.reg_index - 1] == nil then
+        context.reg_index = context.reg_index - 1
+            |pop Rq(reg)
+    else
+        -- operand in register
+        local src = context.reg_stack[context.reg_index - 1]
+        context.reg_index = context.reg_index - 1
+            |mov Rq(reg), Rq(src)
+    end
 end
 
-function gen.pop_rqx(Dst, q)
-        |pop Rq(q)
+function gen.mov_result_to_mem(Dst, context, mem)
+    -- operand in stack
+    if context.reg_stack[context.reg_index - 1] == nil then
+        local dst = context.free_reg2
+        local src = context.free_reg
+            |mov Rq(src), [rsp]
+            |mov64 Rq(dst), mem
+            |mov [Rq(dst)], Rq(src)
+    else
+        -- operand in register
+        local src = context.reg_stack[context.reg_index - 1]
+        local dst = context.free_ref
+            |mov64 Rq(dst), mem
+            |mov [Rq(dst)], Rq(src)
+    end
+end
+
+function gen.push_result_from(Dst, context, reg)
+    -- operand in stack
+    if context.reg_stack[context.reg_index] == nil then
+        context.reg_index = context.reg_index + 1
+            |push Rq(reg)
+    else
+        -- operand in register
+        local dst = context.reg_stack[context.reg_index]
+        context.reg_index = context.reg_index + 1
+            |mov Rq(dst), Rq(reg)
+    end
+end
+
+function gen.push_result_from_mem(Dst, context, mem)
+    -- operand in stack
+    if context.reg_stack[context.reg_index] == nil then
+        local reg = context.free_reg
+        local src = context.free_reg2
+        context.reg_index = context.reg_index + 1
+
+            |mov64 Rq(src), mem
+            |mov Rq(reg), [Rq(src)]
+            |push Rq(reg)
+    else
+        -- operand in register
+        local dst = context.reg_stack[context.reg_index]
+        local src = context.free_reg
+
+        context.reg_index = context.reg_index + 1
+
+            |mov64 Rq(src), mem
+            |mov Rq(dst), [Rq(src)]
+    end
 end
 
 function gen.discard_result(Dst, context)
@@ -132,28 +219,26 @@ function gen.discard_result(Dst, context)
     end
 end
 
-function gen.save_level_to_free_reg(Dst, context)
-    local level = context.reg_index - 1
-        |mov64 Rq(context.free_reg), level
-end
-
 function gen.unwind_results(Dst, context)
-    local log = require('log')
-    log.info(context)
-    log.info('----')
-    local i = context.reg_index
+    assert(#context.dostack ~= 0)
+
     local reg_remain = 0
+    local i = context.dostack[#context.dostack]
     while true do
-        if context.reg_stack[i] == nil then
+        if context.reg_stack[i] == nil or i >= context.reg_index then
             break
         end
         i = i + 1
         reg_remain = reg_remain + 1
     end
 
-    reg_remain = reg_remain*8 -- in bytes
+    local level = context.reg_index - 1
+    level = level - reg_remain
 
-        |lea rsp,[rsp+Rq(context.free_reg)*8-reg_remain]
+    level = level * 8
+    -- save current stack level
+
+        |lea rsp,[rsp+level]
 end
 
 function gen.label(Dst, context, label)
@@ -164,12 +249,35 @@ function gen.jmp(Dst, context, label)
         |jmp =>label
 end
 
-function gen.test_jz(Dst, context, label)
+function gen.pop_test_jz(Dst, context, label)
     if context.reg_index == 1 then
-        error('Too few operands for not')
+        error('Too few operands for pop test jz')
     end
     -- operand in stack
-    if context.reg_stack[context.reg_index-1] == nil then
+    if context.reg_stack[context.reg_index - 1] == nil then
+        context.reg_index = context.reg_index - 1
+
+        local reg = context.free_reg
+            |pop Rq(reg)
+            |test Rq(reg), Rq(reg)
+            |je =>label
+    else
+        -- operand in register
+        local reg = context.reg_stack[context.reg_index-1]
+
+        context.reg_index = context.reg_index - 1
+
+            |test Rq(reg), Rq(reg)
+            |je =>label
+    end
+end
+
+function gen.test_jz(Dst, context, label)
+    if context.reg_index == 1 then
+        error('Too few operands for test jz')
+    end
+    -- operand in stack
+    if context.reg_stack[context.reg_index - 1] == nil then
             |mov Rq(context.free_reg), [rsp]
             |test Rq(context.free_reg), Rq(context.free_reg)
             |je =>label
@@ -183,7 +291,7 @@ end
 
 function gen.test_jnz(Dst, context, label)
     if context.reg_index == 1 then
-        error('Too few operands for not')
+        error('Too few operands for testjnz')
     end
     -- operand in stack
     if context.reg_stack[context.reg_index-1] == nil then
@@ -198,10 +306,9 @@ function gen.test_jnz(Dst, context, label)
     end
 end
 
-
 gen['logical_not'] = function(Dst, context)
     if context.reg_index == 1 then
-        error('Too few operands for not')
+        error('Too few operands for logical not')
     end
     -- operand in stack
     if context.reg_stack[context.reg_index-1] == nil then
@@ -220,17 +327,88 @@ gen['logical_not'] = function(Dst, context)
     end
 end
 
-gen['dec'] = function(Dst, context)
-    if context.reg_index == 1 then
-        error('Too few operands for not')
-    end
-    -- operand in stack
-    if context.reg_stack[context.reg_index-1] == nil then
-            |dec qword[rsp]
-    else
-        -- operand in register
-        local q = context.reg_stack[context.reg_index-1]
-            |dec Rq(q)
+gen['sete'] = function(Dst, context, reg)
+        |sete Rb(reg)
+end
+
+gen['setl'] = function(Dst, context, reg)
+        |setl Rb(reg)
+end
+
+gen['setle'] = function(Dst, context, reg)
+        |setle Rb(reg)
+end
+
+gen['setg'] = function(Dst, context, reg)
+        |setg Rb(reg)
+end
+
+gen['setge'] = function(Dst, context, reg)
+        |setge Rb(reg)
+end
+
+for op, generator in pairs({['=']=gen['sete'],
+        ['<']=gen['setl'],
+        ['<=']=gen['setle'],
+        ['>']=gen['setg'],
+        ['>=']=gen['setge']}) do
+
+    gen[op] = function(Dst, context)
+        if context.reg_index == 1 or context.reg_index == 2 then
+            error('Too few operands for ' .. op)
+        end
+
+        -- two operands in stack
+        if context.reg_stack[context.reg_index - 2] == nil then
+
+            local res = context.free_reg
+            local dst = context.free_reg2
+
+            context.reg_index = context.reg_index - 1
+
+                |pop Rq(dst)
+                |xor Rq(res), Rq(res)
+                |cmp [rsp], Rq(dst)
+
+            generator(Dst, context, res)
+
+                |mov [rsp], Rq(res)
+            return
+        end
+
+        -- one operand in stack
+        if context.reg_stack[context.reg_index - 1] == nil then
+            -- operand in register
+
+            local res = context.free_reg
+            local reg = context.reg_stack[context.reg_index-2]
+
+            context.reg_index = context.reg_index - 1
+
+                |xor Rq(res), Rq(res)
+                |cmp Rq(reg), [rsp]
+
+            generator(Dst, context, res)
+
+                |mov Rq(reg), Rq(res)
+                |add rsp, 8
+
+            return
+        end
+
+        -- two operands in registers
+
+        local res = context.free_reg
+        local dst = context.reg_index - 2
+        local src = context.reg_index - 1
+        context.reg_index = context.reg_index - 1
+
+            |xor Rq(res), Rq(res)
+            |cmp Rq(dst), Rq(src)
+
+        generator(Dst, context, res)
+
+            |mov Rq(dst), Rq(res)
     end
 end
 
@@ -312,7 +490,7 @@ end
 
 gen['xor'] = function(Dst, context)
     if context.reg_index == 1 or context.reg_index == 2 then
-        error('Too few operands for and')
+        error('Too few operands for xor')
     end
 
     -- all operands in stack
@@ -392,21 +570,6 @@ function gen.mov8(Dst, context)
         |and Rq(dst), 0xFF
 end
 
-function gen.pop_rq0(Dst, context)
-    if context.reg_index == 1 then
-        error('Nothing to pop')
-    end
-
-    if context.reg_stack[context.reg_index - 1] == nil then
-        context.reg_index = context.reg_index - 1
-            |pop Rq(0)
-    else
-        local q = context.reg_stack[context.reg_index - 1]
-        context.reg_index = context.reg_index - 1
-            |mov Rq(0), Rq(q)
-    end
-end
-
 function gen.clear_rq0(Dst, context)
         |xor Rq(0), Rq(0)
 end
@@ -456,7 +619,7 @@ function gen.sub(Dst, context, arity)
     end
 
     if context.reg_index == 2 and arity ~= 1 then
-        error('Too few args in stack for 2-ariyt sub.')
+        error('Too few args in stack for 2-arity sub.')
     end
 
     -- one operand only
@@ -532,22 +695,20 @@ end
 -- pop head and result placed on head
 function gen.idiv(Dst, context)
     if context.reg_index == 1 or context.reg_index == 2 then
-        error('Nothing to sub. Stack is empty')
+        error('Nothing to integer div. Stack is empty')
     end
 
     -- two operands in stack
     if context.reg_stack[context.reg_index - 2] == nil then
         context.reg_index = context.reg_index - 1
-        -- TODO save rdx, rax
             |push Rq(2)
             |push Rq(0)
 
             |xor Rq(2), Rq(2)
             |mov Rq(0), qword [rsp+24]
             |idiv qword [rsp+16]
-            |mov qword [rsp+16], Rq(0)
+            |mov qword [rsp+24], Rq(0)
 
-        -- TODO restore rdx, rax
             |pop Rq(0)
             |pop Rq(2)
 
@@ -559,7 +720,6 @@ function gen.idiv(Dst, context)
     if context.reg_stack[context.reg_index - 1] == nil then
         local dst = context.reg_stack[context.reg_index - 2]
         context.reg_index = context.reg_index - 1
-        -- TODO save rdx, rax
             |push Rq(2)
             |push Rq(0)
 
@@ -567,7 +727,7 @@ function gen.idiv(Dst, context)
             |mov Rq(0), Rq(dst)
             |idiv qword [rsp+16]
             |mov Rq(dst), Rq(0)
-        -- TODO restore rdx, rax
+
             |pop Rq(0)
             |pop Rq(2)
             |add rsp, 8
@@ -580,7 +740,6 @@ function gen.idiv(Dst, context)
 
     context.reg_index = context.reg_index - 1
 
-    -- TODO save rdx, rax
         |push Rq(2)
         |push Rq(0)
 
@@ -588,30 +747,21 @@ function gen.idiv(Dst, context)
         |mov Rq(0), Rq(dst)
         |idiv Rq(src)
         |mov Rq(dst), Rq(0)
-    -- TODO restore rdx, rax
+
         |pop Rq(0)
         |pop Rq(2)
 end
 
-function gen.funcall(Dst, ffisymbol, ...)
+function gen.call(Dst, ffisymbol)
     if ffi.C[ffisymbol] == nil then
         error('ffi symbol ' .. ffisymbol .. ' not found')
     end
     local ffiaddr = ffi.C[ffisymbol]
 
-    local nargs = select('#', ...)
-    local args = {...}
-    for i = 1, nargs do
-        if registers.args[i] == nil then
-            error('arguments overflow')
-        end
-
-        gen.mov64_rqx_imm(Dst, registers.args[i],  args[i])
-    end
-
         |mov64 rax, ffiaddr
         |call rax
 end
+
 
 function gen.nop(Dst)
         |nop

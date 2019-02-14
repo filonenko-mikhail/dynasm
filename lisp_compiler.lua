@@ -4,12 +4,12 @@ local ffi = require('ffi')
 local dynasm = require('dynasm')
 local dasm = require('dasm')
 
-local function errorx(format, ...)
-    local message = format:format(...)
-    error(message, 2)
-end
+local utils = require('lisp_utils')
 
 ffi.cdef[[
+unsigned int
+     sleep(unsigned int seconds);
+
 enum iterator_type {
   /* ITER_EQ must be the first member for request_create  */
   ITER_EQ               =  0, /* key == x ASC order                  */
@@ -45,14 +45,12 @@ ssize_t box_index_len(uint32_t space_id, uint32_t index_id);
 
 local lisp_x64 = dynasm.loadfile('lisp_x64.dasl')()
 
-local LispState = {}
 
---local CompilerState = {
---    scratch = {},
---    returns = {},
---    arguments = {},
---    saved = {},
---}
+local function discard_result(state, context, old_index)
+    if context.reg_index > old_index then
+        lisp_x64.gen.discard_result(state, context)
+    end
+end
 
 local function prolog(state, ast, context)
     lisp_x64.gen.prolog(state)
@@ -62,42 +60,34 @@ local function epilog(state, ast, context)
     lisp_x64.gen.epilog(state)
 end
 
-local registers = {
-    rax=0,
-    rcx=1,
-    rdx=2,
-    rbx=3,
-    rsp=4,
-    rbp=5,
-    rsi=6,
-    rdi=7,
-    r8=8,
-    r9=9,
-    r10=10,
-    r11=11,
-    r12=12,
-    r13=13,
-    r14=14,
-    r15=15,
-}
-
 local compile_form = nil
 
 local symbols = {}
 
-function symbols.atom(state, form, context)
+symbols['atom'] = function(state, form, context)
+    -- it's nil
     if #form == 1 then
         lisp_x64.gen.push(state, 0, context)
     end
 
+    -- it's number
     local num = tonumber64(form[2].atom)
     if num ~= nil then
         lisp_x64.gen.push(state, num, context)
         return
     end
 
+    -- it's binding
+    if context.cells[form[2].atom] ~= nil then
+        lisp_x64.gen.push_result_from_mem(state, context,
+                                          context.cells[form[2].atom])
+        return
+    end
+
+    -- it's symbol string
     local result = ffi.new('char[?]', #form[2].atom + 1, form[2].atom)
     table.insert(context.parking, result)
+
     lisp_x64.gen.push(state, result, context)
 end
 
@@ -111,7 +101,7 @@ end
 
 symbols['not'] = function(state, form, context)
     if #form == 1 then
-        errorx('Too few arguments for bitand')
+        utils.errorx('Too few arguments for not at position', form.position)
     end
     compile_form(state, form[2], context)
     lisp_x64.gen['logical_not'](state, context)
@@ -119,7 +109,7 @@ end
 
 symbols['and'] = function(state, form, context)
     if #form == 1 then
-        errorx('Too few arguments for and')
+        utils.errorx('Too few arguments for and at position %q', form.position)
     end
 
     local label = context.label
@@ -127,10 +117,11 @@ symbols['and'] = function(state, form, context)
     dasm.growpc(state, context.label)
 
     for i=2, #form do
+        local old_index = context.reg_index
         compile_form(state, form[i], context)
         lisp_x64.gen.test_jz(state, context, label)
         if i ~= #form then
-            lisp_x64.gen.discard_result(state, context)
+            discard_result(state, context, old_index)
         end
     end
 
@@ -139,7 +130,7 @@ end
 
 symbols['or'] = function(state, form, context)
     if #form == 1 then
-        errorx('Too few arguments for or')
+        utils.errorx('Too few arguments for or at position %q', form.position)
     end
 
     local label = context.label
@@ -147,10 +138,11 @@ symbols['or'] = function(state, form, context)
     dasm.growpc(state, context.label)
 
     for i=2, #form do
+        local old_index = context.reg_index
         compile_form(state, form[i], context)
         lisp_x64.gen.test_jnz(state, context, label)
         if i ~= #form then
-            lisp_x64.gen.discard_result(state, context)
+            discard_result(state, context, old_index)
         end
     end
 
@@ -158,11 +150,11 @@ symbols['or'] = function(state, form, context)
 end
 
 symbols['if'] = function(state, form, context)
-    if #form == 1 or #form == 2 then
-        errorx('Too few arguments for if')
+    if #form == 1 or #form == 2 or #form == 3 then
+        utils.errorx('Too few arguments for if at position %q', form.position)
     end
     if #form > 4 then
-        errorx('Too much arguments for if')
+        utils.errorx('Too much arguments for if at position %q', form.position)
     end
 
     local label = context.label
@@ -173,34 +165,62 @@ symbols['if'] = function(state, form, context)
     dasm.growpc(state, context.label)
 
     -- if
+    local old_index = context.reg_index
     compile_form(state, form[2], context)
-    lisp_x64.gen.test_jz(state, context, label)
+    if old_index + 1 ~= context.reg_index then
+        utils.errorx('Condition have to return result at position %q', form[2].position)
+    end
+    lisp_x64.gen.pop_test_jz(state, context, label)
 
     -- then
-    lisp_x64.gen.discard_result(state, context) -- discard if condition
+    local old_index = context.reg_index
     compile_form(state, form[3], context)
     lisp_x64.gen.jmp(state, context, label_end) -- jump to end
 
     -- else
-    lisp_x64.gen.label(state, context, label)
-
-    if #form == 4 then
-        lisp_x64.gen.discard_result(state, context) -- discard if condition
-        compile_form(state, form[4], context)
+    -- decrease stack level
+    if old_index + 1 == context.reg_index then
+        context.reg_index = context.reg_index - 1
     end
+    lisp_x64.gen.label(state, context, label) -- else label
+    compile_form(state, form[4], context)
 
     -- end
     lisp_x64.gen.label(state, context, label_end)
 end
 
+-- generate numeric comparators
+for _, op in ipairs({'=', '<', '<=', '>', '>='}) do
+    symbols[op] = function(state, form, context)
+        if #form == 1 or #form == 2 then
+            utils.errorx('Too few arguments for %s at position %q', op, form.position)
+        end
+        if #form > 3 then
+            utils.errorx('Too much arguments for %s at position %q', op, form.position)
+        end
+
+        local old_index = context.reg_index
+        compile_form(state, form[2], context)
+        if context.reg_index ~= old_index + 1 then
+            utils.errorx('No result 1st argument of %s at position %q', op, form.position)
+        end
+        old_index = context.reg_index
+        compile_form(state, form[3], context)
+        if context.reg_index ~= old_index + 1 then
+            utils.errorx('No result 2nd argument of %s at position %q', op, form.position)
+        end
+
+        lisp_x64.gen[op](state, context)
+    end
+end
 
 -- do
 symbols['do'] = function(state, form, context)
     if #form == 1 then
-        errorx('Too few arguments for do')
+        utils.errorx('Too few arguments for do at position %q', form.position)
     end
     if #form > 2 then
-        errorx('Too much arguments for do')
+        utils.errorx('Too much arguments for do at position %q', form.position)
     end
 
     local label = context.label
@@ -211,43 +231,64 @@ symbols['do'] = function(state, form, context)
     context.label = context.label + 1
     dasm.growpc(state, context.label)
 
-    table.insert(context.dostack, label_end)
+    table.insert(context.docontinue, label)
+    table.insert(context.dobreak, label_end)
+    table.insert(context.dostack, context.reg_index)
 
     -- begin
     lisp_x64.gen.label(state, context, label)
 
+    local old_index = context.reg_index
     compile_form(state, form[2], context)
+    discard_result(state, context, old_index) -- discard body loop
+
+    -- continue
     lisp_x64.gen.jmp(state, context, label)
 
     -- end
     lisp_x64.gen.label(state, context, label_end)
 
     table.remove(context.dostack)
-    -- discard results of inner forms
-    -- free_reg contains inner level
-    lisp_x64.gen.unwind_results(state, context)
+    table.remove(context.dobreak)
+    table.remove(context.docontinue)
 end
 
 -- break
 symbols['break'] = function(state, form, context)
-    if #form > 3 then
-        errorx('Too much arguments for do')
+    if #form > 1 then
+        utils.errorx('Too much arguments for break at position %q', form.position)
     end
 
-    local label_end = context.dostack[#context.dostack]
-
-    if label_end < 0  then
-        errorx('No loop for break at position %q', form.position)
+    if #context.dobreak == 0 then
+        utils.errorx('No loop for break at position %q', form.position)
     end
+
+    local label_end = context.dobreak[#context.dobreak]
 
     -- save form level to free_reg
-    lisp_x64.gen.save_level_to_free_reg(state, context)
+    lisp_x64.gen.unwind_results(state, context)
     lisp_x64.gen.jmp(state, context, label_end)
+end
+
+-- continue
+symbols['continue'] = function(state, form, context)
+    if #form > 1 then
+        utils.errorx('Too much arguments for continue %q', form.position)
+    end
+
+    if #context.docontinue == 0 then
+        utils.errorx('No loop for continue at position %q', form.position)
+    end
+    local label = context.docontinue[#context.docontinue]
+
+    -- save form level to free_reg
+    lisp_x64.gen.unwind_results(state, context)
+    lisp_x64.gen.jmp(state, context, label)
 end
 
 symbols['bitnot'] = function(state, form, context)
     if #form == 1 then
-        errorx('Too few arguments for bitand')
+        utils.errorx('Too few arguments for bitnot at position %q', form.position)
     end
     compile_form(state, form[2], context)
     lisp_x64.gen['not'](state, context)
@@ -255,7 +296,7 @@ end
 
 symbols['bitand'] = function(state, form, context)
     if #form == 1 or #form == 2 then
-        errorx('Too few arguments for bitand')
+        utils.errorx('Too few arguments for bitand at position %q', form.position)
     end
 
     compile_form(state, form[2], context)
@@ -266,7 +307,7 @@ end
 
 symbols['bitor'] = function(state, form, context)
     if #form == 1 or #form == 2 then
-        errorx('Too few arguments for bitor')
+        utils.errorx('Too few arguments for bitor at position %q', form.position)
     end
 
     compile_form(state, form[2], context)
@@ -277,7 +318,7 @@ end
 
 symbols['bitxor'] = function(state, form, context)
     if #form == 1 or #form == 2 then
-        errorx('Too few arguments for bitxor')
+        utils.errorx('Too few arguments for bitxor at position %q', form.position)
     end
 
     compile_form(state, form[2], context)
@@ -288,7 +329,7 @@ end
 
 symbols['+'] = function(state, form, context)
     if #form == 1 then
-        errorx('Too few arguments for plus')
+        utils.errorx('Too few arguments for plus at position %q', form.position)
     end
 
     local iter = 2
@@ -306,8 +347,7 @@ end
 
 symbols['-'] = function(state, form, context)
     if #form == 1 then
-        errorx('Not enough arguments for substract at form %q position %q',
-        form, form.position)
+        utils.errorx('Too few arguments for - at position %q', form.position)
     end
 
     local iter = 2
@@ -330,7 +370,7 @@ end
 
 symbols['*'] = function(state, form, context)
     if #form == 1 or #form == 2 then
-        errorx('Not enough arguments for multiply')
+        utils.errorx('Too few arguments for * at position', form.position)
     end
 
     local iter = 2
@@ -348,7 +388,7 @@ end
 
 symbols['/'] = function(state, form, context)
     if #form == 1 or #form == 2 then
-        errorx('Not enough arguments for division at position %q', form.position)
+        utils.errorx('Too few arguments for / at position %q', form.position)
     end
 
     local iter = 2
@@ -364,20 +404,20 @@ symbols['/'] = function(state, form, context)
     end
 end
 
-symbols['elt'] = function(state, form, context)
+symbols['elt8'] = function(state, form, context)
     if #form == 1 or #form == 2 then
-        errorx('Not enough arguments for [] at position %q', form.position)
+        utils.errorx('Not enough arguments for elt at position %q', form.position)
     end
     compile_form(state, form[2], context)
     compile_form(state, form[3], context)
     lisp_x64.gen.mov8(state, context)
 end
 
-function symbols.int3(state, form, context)
+symbols['int3'] = function(state, form, context)
     lisp_x64.gen.int3(state)
 end
 
-function symbols.progn(state, form, context, start_from)
+symbols['progn'] = function(state, form, context, start_from)
     start_from = start_from or 2
 
     for i=start_from, #form do
@@ -385,12 +425,41 @@ function symbols.progn(state, form, context, start_from)
         compile_form(state, form[i], context)
 
         -- ignore result for non last forms
-        if context.reg_index > old_index then
-            if i ~= #form then
-                lisp_x64.gen.pop_rq0(state, context)
-            end
+        if i ~= #form then
+            discard_result(state, context, old_index)
         end
     end
+end
+
+symbols['stdcall'] = function(state, form, context)
+    if #form == 1 then
+        utils.errorx('Too few arguments for progn at position %q', form.position)
+    end
+
+    if form[2].atom == nil then
+        utils.errorx('Second arg has to be atom at position %q', form.position)
+    end
+
+    for i = 1, #form-2 do
+        if context.registers.args[i] == nil then
+            utils.errorx('Sorry arguments overflow at position %q', form.position)
+        end
+
+        local old_index = context.old_index
+        compile_form(state, form[i+2], context)
+        if context.reg_index == old_index then
+            utils.errorx('Argument form has no result at position %q', form[i+2].position)
+        end
+        lisp_x64.gen.pop_result_to(state, context, context.registers.args[i])
+    end
+
+    lisp_x64.gen.align_stack_to16(state, context)
+
+    lisp_x64.gen.call(state, form[2].atom)
+
+    lisp_x64.gen.align_stack_back_to16(state, context)
+
+    lisp_x64.gen.push_result_from(state, context, context.registers.returns[1])
 end
 
 local function is_atom(state, form, context)
@@ -401,9 +470,72 @@ local function is_atom(state, form, context)
     return form.atom ~= nil
 end
 
+symbols['set'] = function(state, form, context)
+    if #form == 1 or #form == 2 then
+        utils.errorx('Too few arguments for set at position %q', form.position)
+    end
+
+    if #form > 3 then
+        utils.errorx('Too much arguments for set at position %q', form.position)
+    end
+
+    local subform = form[2]
+    if not is_atom(state, subform, context) then
+        utils.errorx('2nd argument of set has to be list with atoms at position', form.position)
+    end
+
+    if context.cells[subform.atom] == nil then
+        utils.errorx('Symbol %q is not defined at position %q', subform.atom,
+                     form.position)
+    end
+
+    local old_index = context.reg_index
+    compile_form(state, form[3], context)
+    if context.reg_index > old_index then
+        lisp_x64.gen.mov_result_to_mem(state, context, context.cells[subform.atom])
+    else
+        utils.errorx('No result for assign at position %q', form.position)
+    end
+end
+
+symbols['let'] = function(state, form, context)
+    if #form == 1 or #form == 2 then
+        utils.errorx('Too few arguments for let at position %q', form.position)
+    end
+
+    if #form > 3 then
+        utils.errorx('Too much arguments for let at position %q', form.position)
+    end
+
+    for i=1,#form[2] do
+        local subform = form[2][i]
+
+        if not is_atom(state, subform, context) then
+            utils.errorx('2nd argument of let has to be list with atoms at position %q', form.position)
+        end
+
+        if context.cells[subform.atom] ~= nil then
+            utils.errorx('Symbol %q already defined error position %q',
+                         subform.atom, form.position)
+        end
+
+        context.cells[subform.atom] = ffi.new('uint64_t[1]', 0)
+    end
+
+    compile_form(state, form[3], context)
+
+    -- free context cells
+    -- but save memory from gc to runtime
+    for name, addr in pairs(context.cells) do
+        table.insert(context.parking, addr)
+        context.cells[name] = nil
+    end
+end
+
+
 compile_form = function(state, form, context)
     if type(form) ~= 'table' then
-        errorx('Can not compile form %q', form)
+        utils.errorx('Can not compile form at position %q', form.position)
     end
 
     if is_atom(state, form, context) then
@@ -414,15 +546,16 @@ compile_form = function(state, form, context)
     end
 
     if #form == 0 then
-        errorx('Empty form at position', form.position)
+        utils.errorx('Empty form at position', form.position)
     end
 
     if form[1].atom == nil then
-        errorx('form first place have to be atom at position %q', form.position)
+        utils.errorx('form first place have to be atom at position %q', form.position)
+
     end
 
     if symbols[form[1].atom] == nil then
-        errorx('No special form %q position %q', form[1].atom, form[1].position)
+        utils.errorx('No special at position %q', form.position)
     end
 
     local old_index = context.reg_index
@@ -431,7 +564,7 @@ compile_form = function(state, form, context)
 
     if context.reg_index ~= old_index then
         if context.reg_index - 1 ~= old_index then
-            errorx("Stack corrupt after form %q at position %q", form,
+            utils.errorx("Stack corrupt after form at position %q",
                    form.position)
         end
     end
@@ -440,12 +573,10 @@ end
 local function compile(ast, register_count)
     register_count = register_count or 0
     local M = {}
-    --local test_space_id = box.space.test.id
     --create a dynasm state with the generated action list
     local state, globals = dasm.new(lisp_x64.actions)
     local context = lisp_x64.gen.new_context_with_registers(register_count)
 
-    --lisp_x64.gen.int3(state)
     prolog(state, ast, context)
 
     local old_index = context.reg_index
@@ -453,12 +584,11 @@ local function compile(ast, register_count)
 
     -- ignore result for non last forms
     if context.reg_index > old_index then
-        lisp_x64.gen.pop_rq0(state, context)
+        lisp_x64.gen.pop_result_to(state, context,
+                                   context.registers.returns[1])
     else
         lisp_x64.gen.clear_rq0(state, context)
     end
-
-    --lisp_x64.gen.pop_rq0(state, context)
 
     epilog(state, ast, context)
 
