@@ -9,15 +9,15 @@ local dasm = require('dasm')
 local dynasm = require('dynasm')
 
 -- load generators
-local lisp_x64 = dynasm.loadfile(script_dir..'/'..'x64.dasl')()
+local x64 = dynasm.loadfile(script_dir..'/'..'x64.dasl')()
 
 -- make compiler state from generators
-local state, globals = dasm.new(lisp_x64.actions)
+local state, globals = dasm.new(x64.actions)
 
 -- generate code
-lisp_x64.gen.prolog(state)
-lisp_x64.gen.nop(state)
-lisp_x64.gen.epilog(state)
+x64.gen.prolog(state)
+x64.gen.nop(state)
+x64.gen.epilog(state)
 
 --check, link and encode the code
 local buf, size = state:build()

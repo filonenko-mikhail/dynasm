@@ -123,7 +123,7 @@ end
 function gen.align_stack_to16(Dst, context)
     local filled = context.reg_index - 1
     if filled > #context.reg_stack then
-        filled = filled - context.reg_stack
+        filled = filled - #context.reg_stack
     end
 
     if filled % 2 ~= 0 then
@@ -331,6 +331,10 @@ gen['sete'] = function(Dst, context, reg)
         |sete Rb(reg)
 end
 
+gen['setne'] = function(Dst, context, reg)
+        |setne Rb(reg)
+end
+
 gen['setl'] = function(Dst, context, reg)
         |setl Rb(reg)
 end
@@ -351,7 +355,8 @@ for op, generator in pairs({['=']=gen['sete'],
         ['<']=gen['setl'],
         ['<=']=gen['setle'],
         ['>']=gen['setg'],
-        ['>=']=gen['setge']}) do
+        ['>=']=gen['setge'],
+        ['/=']=gen['setne']}) do
 
     gen[op] = function(Dst, context)
         if context.reg_index == 1 or context.reg_index == 2 then
@@ -399,8 +404,8 @@ for op, generator in pairs({['=']=gen['sete'],
         -- two operands in registers
 
         local res = context.free_reg
-        local dst = context.reg_index - 2
-        local src = context.reg_index - 1
+        local dst = context.reg_stack[context.reg_index - 2]
+        local src = context.reg_stack[context.reg_index - 1]
         context.reg_index = context.reg_index - 1
 
             |xor Rq(res), Rq(res)
@@ -617,23 +622,27 @@ function gen.mov8(Dst, context)
 
     -- two operands in stack
     if context.reg_stack[context.reg_index - 2] == nil then
+
+        free_reg = context.free_reg
+        free_reg2 = context.free_reg2
         context.reg_index = context.reg_index - 1
 
-            |pop Rq(context.free_reg2) -- index
-            |pop Rq(context.free_reg) -- base
-            |mov Rq(context.free_reg), [Rq(context.free_reg)+Rq(context.free_reg2)]
-            |and Rq(context.free_reg), 0xFF
-            |push Rq(context.free_reg)
+            |pop Rq(free_reg2) -- index
+            |pop Rq(free_reg) -- base
+            |mov Rq(free_reg), [Rq(free_reg)+Rq(free_reg2)]
+            |and Rq(free_reg), 0xFF
+            |push Rq(free_reg)
         return
     end
 
     -- one operand in stack
     if context.reg_stack[context.reg_index - 1] == nil then
         local index = context.reg_stack[context.reg_index - 2]
+        local free_reg = context.free_reg
         context.reg_index = context.reg_index - 1
 
-            |pop Rq(context.free_reg) -- base
-            |mov Rq(index), [Rq(context.free_reg)+Rq(index)]
+            |pop Rq(free_reg) -- base
+            |mov Rq(index), [Rq(free_reg)+Rq(index)]
             |and Rq(index), 0xFF
         return
     end
@@ -841,15 +850,15 @@ function gen.call(Dst, ffisymbol)
 end
 
 
-function gen.nop(Dst)
+function gen.nop(Dst, context)
         |nop
 end
 
-function gen.int3(Dst)
+function gen.int3(Dst, context)
         |int3
 end
 
-function gen.prolog(Dst)
+function gen.prolog(Dst, context)
         |push rbp
         |mov rbp,rsp
 
@@ -860,7 +869,7 @@ function gen.prolog(Dst)
         |push rbx
 end
 
-function gen.epilog(Dst)
+function gen.epilog(Dst, context)
         |pop rbx
         |pop r12
         |pop r13

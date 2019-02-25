@@ -1,12 +1,10 @@
 #!/usr/bin/env tarantool
 
-
 local utf8 = require('utf8')
 
 local utils = require('lisp_utils')
 
-
-local function parse(input, ast)
+local function parse(input)
     local WAIT_ANY = 1
     local WAIT_DOUBLE_QUOTE = 2
     local state = WAIT_ANY
@@ -123,7 +121,7 @@ local function parse(input, ast)
     end
 
     if #stack >= 1 then
-        utils.errorx('List is not closed')
+        utils.errorx('Unexpected eof list is not closed')
     end
 
     return ast

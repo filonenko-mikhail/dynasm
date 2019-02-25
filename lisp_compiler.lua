@@ -7,8 +7,7 @@ local dasm = require('dasm')
 local utils = require('lisp_utils')
 
 ffi.cdef[[
-unsigned int
-     sleep(unsigned int seconds);
+unsigned int sleep(unsigned int seconds);
 
 enum iterator_type {
   /* ITER_EQ must be the first member for request_create  */
@@ -36,19 +35,24 @@ box_iterator_t *box_index_iterator(uint32_t space_id, uint32_t index_id, int typ
 int box_iterator_next(box_iterator_t *iterator, box_tuple_t **result);
 void box_iterator_free(box_iterator_t *iterator);
 
-
 /* Utility */
 int iterator_direction(enum iterator_type type);
 ssize_t box_index_len(uint32_t space_id, uint32_t index_id);
 
+void* calloc(size_t count, size_t size);
+void free(void*);
 ]]
 
 local lisp_x64 = dynasm.loadfile('lisp_x64.dasl')()
 
-
-local function discard_result(state, context, old_index)
-    if context.reg_index > old_index then
-        lisp_x64.gen.discard_result(state, context)
+local function discard_result(state, form, context, old_index)
+    if old_index ~= context.reg_index then
+        if old_index + 1 == context.reg_index then
+            lisp_x64.gen.discard_result(state, context)
+        else
+            utils.errorx('stack corrupt at end form position %q',
+                         form.position)
+        end
     end
 end
 
@@ -121,7 +125,7 @@ symbols['and'] = function(state, form, context)
         compile_form(state, form[i], context)
         lisp_x64.gen.test_jz(state, context, label)
         if i ~= #form then
-            discard_result(state, context, old_index)
+            discard_result(state, form, context, old_index)
         end
     end
 
@@ -142,7 +146,7 @@ symbols['or'] = function(state, form, context)
         compile_form(state, form[i], context)
         lisp_x64.gen.test_jnz(state, context, label)
         if i ~= #form then
-            discard_result(state, context, old_index)
+            discard_result(state, form, context, old_index)
         end
     end
 
@@ -150,7 +154,7 @@ symbols['or'] = function(state, form, context)
 end
 
 symbols['if'] = function(state, form, context)
-    if #form == 1 or #form == 2 or #form == 3 then
+    if #form == 1 or #form == 2 then
         utils.errorx('Too few arguments for if at position %q', form.position)
     end
     if #form > 4 then
@@ -160,6 +164,7 @@ symbols['if'] = function(state, form, context)
     local label = context.label
     context.label = context.label + 1
     dasm.growpc(state, context.label)
+
     local label_end = context.label
     context.label = context.label + 1
     dasm.growpc(state, context.label)
@@ -175,22 +180,38 @@ symbols['if'] = function(state, form, context)
     -- then
     local old_index = context.reg_index
     compile_form(state, form[3], context)
-    lisp_x64.gen.jmp(state, context, label_end) -- jump to end
-
-    -- else
-    -- decrease stack level
-    if old_index + 1 == context.reg_index then
-        context.reg_index = context.reg_index - 1
+    -- in case of non return return 0
+    if old_index == context.reg_index then
+        lisp_x64.gen.push(state, 0, context)
     end
-    lisp_x64.gen.label(state, context, label) -- else label
-    compile_form(state, form[4], context)
+
+    if #form == 4 then
+        lisp_x64.gen.jmp(state, context, label_end) -- jump to end
+        -- `else`
+        -- decrease compiler context stack level
+        -- because the only one will be executed
+        -- `then` or `else` form
+        context.reg_index = old_index
+        lisp_x64.gen.label(state, context, label) -- else label
+        local old_index = context.reg_index
+        compile_form(state, form[4], context)
+        if old_index == context.reg_index then
+            lisp_x64.gen.push(state, 0, context)
+        end
+    else
+        lisp_x64.gen.jmp(state, context, label_end) -- jump to end
+
+        context.reg_index = old_index
+        lisp_x64.gen.label(state, context, label) -- else label
+        lisp_x64.gen.push(state, 0, context)
+    end
 
     -- end
     lisp_x64.gen.label(state, context, label_end)
 end
 
 -- generate numeric comparators
-for _, op in ipairs({'=', '<', '<=', '>', '>='}) do
+for _, op in ipairs({'=', '<', '<=', '>', '>=', "/="}) do
     symbols[op] = function(state, form, context)
         if #form == 1 or #form == 2 then
             utils.errorx('Too few arguments for %s at position %q', op, form.position)
@@ -240,7 +261,7 @@ symbols['do'] = function(state, form, context)
 
     local old_index = context.reg_index
     compile_form(state, form[2], context)
-    discard_result(state, context, old_index) -- discard body loop
+    discard_result(state, form, context, old_index) -- discard body loop
 
     -- continue
     lisp_x64.gen.jmp(state, context, label)
@@ -422,7 +443,7 @@ symbols['progn'] = function(state, form, context, start_from)
 
         -- ignore result for non last forms
         if i ~= #form then
-            discard_result(state, context, old_index)
+            discard_result(state, form, context, old_index)
         end
     end
 end
@@ -450,6 +471,15 @@ symbols['stdcall'] = function(state, form, context)
     end
 
     lisp_x64.gen.align_stack_to16(state, context)
+
+    if form[2].atom then
+        local rc, res = pcall(function() return ffi.C[form[2].atom] end)
+        if not rc or not res then
+            utils.errorx('ffi symbol %q not found at position %q',
+                         form[2].atom,
+                         form.position)
+        end
+    end
 
     lisp_x64.gen.call(state, form[2].atom)
 
@@ -558,16 +588,30 @@ compile_form = function(state, form, context)
 
     symbols[form[1].atom](state, form, context)
 
-    if context.reg_index ~= old_index then
-        if context.reg_index - 1 ~= old_index then
+    if old_index ~= context.reg_index then
+        if old_index + 1 ~= context.reg_index then
             utils.errorx("Stack corrupt after form at position %q",
                    form.position)
         end
     end
 end
 
+local asm_lines = {}
+local old_put = dasm.put
+dasm.put = function (Dst, ...)
+    asm_lines[Dst] = asm_lines[Dst] or {}
+
+    asm_lines[Dst].step = asm_lines[Dst].step or 0
+
+    asm_lines[Dst].step = asm_lines[Dst].step + 1
+
+    old_put(Dst, ...)
+end
+
+
 local function compile(ast, register_count)
     register_count = register_count or 0
+
     local M = {}
     --create a dynasm state with the generated action list
     local state, globals = dasm.new(lisp_x64.actions)

@@ -132,6 +132,39 @@ local codes = {
     {[[ (shl 1 4)]], 16ULL},
 
     {[[ (shr 16 4)]], 1ULL},
+
+    {[[ (/= 1 2)]], 1ULL},
+    {[[ (/= 1 1)]], 0ULL},
+    {[[ (progn 1 (if 0 1) 2)]], 2ULL},
+    {[[ (progn 1 (if 0 (if 0 4)) 2)]], 2ULL},
+
+    {[[
+(let (space-id
+      index-id
+      iterator
+      tuple)
+
+     (progn
+       (set space-id (stdcall box_space_id_by_name test 4))
+
+       (if (/= 2147483647 space-id)
+         (progn
+
+         (set index-id (stdcall box_index_id_by_name space-id test 4))
+         (if (/= 2147483647 index-id)
+           (progn
+           (comment (set tuple (stdcall calloc 1 8)))
+           (comment (set iterator (stdcall box_index_iterator space-id index-id 2 0 0)))
+
+           (comment (if (/= 0 iterator) (nop))
+             (progn
+              (stdcall box_iterator_next iterator tuple)
+                (if (= 0 (stdcall box_iterator_next iterator tuple))
+                 (stdcall box_iterator_free iterator))))
+
+           (stdcall free tuple)))))
+       0))
+]], 0ULL}
 }
 
 for idx, code in ipairs(codes) do
