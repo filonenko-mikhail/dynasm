@@ -35,6 +35,11 @@ box_iterator_t *box_index_iterator(uint32_t space_id, uint32_t index_id, int typ
 int box_iterator_next(box_iterator_t *iterator, box_tuple_t **result);
 void box_iterator_free(box_iterator_t *iterator);
 
+typedef struct box_error_t {} box_error_t;
+box_error_t * box_error_last(void);
+
+const char *box_tuple_field(const box_tuple_t *tuple, uint32_t field_id);
+
 /* Utility */
 int iterator_direction(enum iterator_type type);
 ssize_t box_index_len(uint32_t space_id, uint32_t index_id);
@@ -421,14 +426,24 @@ symbols['/'] = function(state, form, context)
     end
 end
 
-symbols['elt8'] = function(state, form, context)
+symbols['elt64'] = function(state, form, context)
     if #form == 1 or #form == 2 then
-        utils.errorx('Not enough arguments for elt at position %q', form.position)
+        utils.errorx('Not enough arguments for elt64 at position %q', form.position)
     end
     compile_form(state, form[2], context)
     compile_form(state, form[3], context)
-    lisp_x64.gen.mov8(state, context)
+    lisp_x64.gen.mov64(state, context)
 end
+
+symbols['set-elt64'] = function(state, form, context)
+    if #form == 1 or #form == 2 then
+        utils.errorx('Not enough arguments for set-elt64 at position %q', form.position)
+    end
+    compile_form(state, form[2], context)
+    compile_form(state, form[3], context)
+    lisp_x64.gen.mov64_to_mem(state, context)
+end
+
 
 symbols['int3'] = function(state, form, context)
     lisp_x64.gen.int3(state)
@@ -448,7 +463,7 @@ symbols['progn'] = function(state, form, context, start_from)
     end
 end
 
-symbols['stdcall'] = function(state, form, context)
+symbols['call'] = function(state, form, context)
     if #form == 1 then
         utils.errorx('Too few arguments for progn at position %q', form.position)
     end
@@ -581,7 +596,7 @@ compile_form = function(state, form, context)
     end
 
     if symbols[form[1].atom] == nil then
-        utils.errorx('No special at position %q', form.position)
+        utils.errorx('No special from %q at position %q', form[1].atom, form.position)
     end
 
     local old_index = context.reg_index

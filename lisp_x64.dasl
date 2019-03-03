@@ -1,6 +1,8 @@
 local ffi = require('ffi') --required
 local dasm = require('dasm') --required
 
+local log = require('log')
+
 --must be the first instruction
 |.arch x64
 --make an action list called `actions`
@@ -65,7 +67,7 @@ function gen.new_context()
     context.reg_stack = {}
     context.reg_index = 1
     context.free_reg = 0 -- rax
-    context.free_reg2 = 2 -- rdx
+    context.free_reg2 = 10 -- r10
 
     context.label = 0
 
@@ -105,7 +107,7 @@ function gen.new_context_with_registers(count)
     end
     context.reg_index = 1
     context.free_reg = 0 -- rax
-    context.free_reg2 = 2 -- rdx
+    context.free_reg2 = 10 -- rdx
 
     context.label = 0
 
@@ -126,7 +128,8 @@ function gen.align_stack_to16(Dst, context)
         filled = filled - #context.reg_stack
     end
 
-    if filled % 2 ~= 0 then
+
+    if (filled + 1) % 2 ~= 0 then
         table.insert(context.alignstack, true)
         local mask = tonumber64('0xFFFFFFFFFFFFFFF0')
             |and rsp, mask
@@ -615,9 +618,9 @@ function gen.push(Dst, imm, context)
     end
 end
 
-function gen.mov8(Dst, context)
+function gen.mov64(Dst, context)
     if context.reg_index == 1 or context.reg_index == 2 then
-        error('Nothing to sub. Stack is empty')
+        error('Nothing to mov. Stack is empty')
     end
 
     -- two operands in stack
@@ -630,7 +633,6 @@ function gen.mov8(Dst, context)
             |pop Rq(free_reg2) -- index
             |pop Rq(free_reg) -- base
             |mov Rq(free_reg), [Rq(free_reg)+Rq(free_reg2)]
-            |and Rq(free_reg), 0xFF
             |push Rq(free_reg)
         return
     end
@@ -643,7 +645,6 @@ function gen.mov8(Dst, context)
 
             |pop Rq(free_reg) -- base
             |mov Rq(index), [Rq(free_reg)+Rq(index)]
-            |and Rq(index), 0xFF
         return
     end
 
@@ -654,7 +655,46 @@ function gen.mov8(Dst, context)
     context.reg_index = context.reg_index - 1
 
         |mov Rq(dst), [Rq(dst)+Rq(src)]
-        |and Rq(dst), 0xFF
+end
+
+function gen.mov64_to_mem(Dst, context)
+    if context.reg_index == 1 or context.reg_index == 2 then
+        error('Nothing to mov to mem. Stack is empty')
+    end
+
+    -- two operands in stack
+    if context.reg_stack[context.reg_index - 2] == nil then
+
+        free_reg = context.free_reg
+        free_reg2 = context.free_reg2
+        context.reg_index = context.reg_index - 1
+
+            |pop Rq(free_reg2) -- value
+            |pop Rq(free_reg) -- base
+            |mov [Rq(free_reg)], Rq(free_reg2)
+            |push Rq(free_reg2)
+        return
+    end
+
+    -- one operand in stack
+    if context.reg_stack[context.reg_index - 1] == nil then
+        local base = context.reg_stack[context.reg_index - 2]
+        local free_reg = context.free_reg
+        context.reg_index = context.reg_index - 1
+
+            |pop Rq(free_reg) -- value
+            |mov [Rq(base)], Rq(free_reg)
+            |mov Rq(base), Rq(free_reg)
+        return
+    end
+
+    -- operands in registers
+    local dst = context.reg_stack[context.reg_index - 2] -- base
+    local src = context.reg_stack[context.reg_index - 1] -- value
+
+    context.reg_index = context.reg_index - 1
+
+        |mov [Rq(dst)], Rq(src)
 end
 
 function gen.clear_rq0(Dst, context)
@@ -880,6 +920,11 @@ function gen.epilog(Dst, context)
         |pop rbp
 
         |ret
+end
+
+_G.diff = 1
+function gen.test(Dst)
+        |add rax, _G.diff
 end
 
 return {gen = gen, actions = actions, globalnames = globalnames}
